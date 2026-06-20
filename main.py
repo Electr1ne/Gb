@@ -4,7 +4,6 @@ import os
 import random
 import sqlite3
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import Command
@@ -19,23 +18,14 @@ from aiogram.types import (
 )
 from aiogram.filters.callback_data import CallbackData
 
-env_path = os.path.join(os.getcwd(), '.env')
-
-# Загружаем файл из текущей папки
-load_dotenv(dotenv_path=env_path)
-
-# ================= НАСТРОЙКИ БОТА (БЕРУТСЯ ИЗ ENV) =================
+# ================= НАСТРОЙКИ БОТА =================
+# Платформа Bothost автоматически подставит токен сюда
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise ValueError(f"❌ Ошибка: BOT_TOKEN не найден!\n"
-                     f"Код искал файл .env строго в текущей директории:\n{env_path}\n"
-                     f"Убедись, что файл лежит именно там и называется ровно '.env'")
 
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", 963968579))
 except (ValueError, TypeError):
-    ADMIN_ID = 963968579
+    ADMIN_ID = 963968579  # Твой ID останется тут как запасной, если в панели не указан
 
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 logging.basicConfig(level=logging.INFO)
