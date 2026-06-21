@@ -20,6 +20,7 @@ from aiogram.filters.callback_data import CallbackData
 
 # ================= НАСТРОЙКИ БОТА =================
 
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 try:
@@ -70,7 +71,7 @@ CREATE TABLE IF NOT EXISTS season_info (
 )
 """)
 
-# НОВЫЕ ТАБЛИЦЫ ДЛЯ ПРОМОКОДОВ
+# ТАБЛИЦЫ ДЛЯ ПРОМОКОДОВ (С ДОБАВЛЕННЫМИ ПОЛЯМИ СРОКА ДЕЙСТВИЯ И БЕСКОНЕЧНЫХ АКТИВАЦИЙ)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS promocodes (
     code TEXT PRIMARY KEY,
@@ -78,9 +79,20 @@ CREATE TABLE IF NOT EXISTS promocodes (
     current_activations INTEGER DEFAULT 0,
     target_user_id INTEGER DEFAULT 0,
     type TEXT,
-    reward_amount REAL DEFAULT 0.0
+    reward_amount REAL DEFAULT 0.0,
+    expires_at TEXT DEFAULT 'never',
+    is_infinite_activations INTEGER DEFAULT 0
 )
 """)
+
+# Скрипт миграции на случай, если таблицы уже существуют в бд, чтобы не было ошибок
+try:
+    cursor.execute("ALTER TABLE promocodes ADD COLUMN expires_at TEXT DEFAULT 'never'")
+    cursor.execute("ALTER TABLE promocodes ADD COLUMN is_infinite_activations INTEGER DEFAULT 0")
+    conn.commit()
+except sqlite3.OperationalError:
+    pass
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS promo_activations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,18 +137,16 @@ class AdminManageCB(CallbackData, prefix="amanage"):
 class AdminSeasonCB(CallbackData, prefix="aseason"):
     action: str
 
-# Фабрики для интерактивного выбора режима изменения баланса (сезон или только баланс)
 class AdminConfirmGiveCB(CallbackData, prefix="cfgive"):
     target_id: int
     amount: float
-    include_season: int  # 1 - да, 0 - нет
+    include_season: int
 
 class AdminConfirmTakeCB(CallbackData, prefix="cftake"):
     target_id: int
     amount: float
-    include_season: int  # 1 - да, 0 - нет
+    include_season: int
 
-# Фабрика для настройки промокодов админом
 class AdminPromoCB(CallbackData, prefix="apromo"):
     action: str
     value: str = ""
@@ -156,8 +166,10 @@ class BotStates(StatesGroup):
     
     # Состояния для промокодов
     waiting_for_promo_name = State()
+    waiting_for_promo_limit_type = State()
     waiting_for_promo_activations = State()
     waiting_for_promo_target_id = State()
+    waiting_for_promo_expiration_date = State()
     waiting_for_promo_reward = State()
     waiting_for_user_promo_activate = State()
 
@@ -202,14 +214,12 @@ async def check_and_close_season(force=False):
     
     end_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
     if datetime.now() >= end_date or force:
-        # Берем Топ-3 игроков сезона
         cursor.execute("SELECT user_id, username, season_earned FROM users WHERE is_banned = 0 AND season_earned > 0 ORDER BY season_earned DESC LIMIT 3")
         winners = cursor.fetchall()
         
         report_text = "🏆 Сезон лидерборда успешно завершен!\n\n"
         
         if winners:
-            # --- ТОП-1 ---
             w1_id, w1_name, w1_earned = winners[0]
             report_text += f"🥇 Топ-1: {w1_name} (ID: {w1_id}) | За сезон: {round(w1_earned, 2)} ⭐\n(Награда: Приз от Администратора, звезды автоматически не начислялись)\n\n"
             try:
@@ -220,12 +230,9 @@ async def check_and_close_season(force=False):
                 )
             except Exception: pass
 
-            # Генерируем случайные награды до 10 звезд для Топ-2 и Топ-3 (Топ-2 всегда строго больше Топ-3)
-            # Например, Топ-2 получает от 5.0 до 10.0, Топ-3 от 1.0 до 4.9
             top2_prize = round(random.uniform(5.0, 10.0), 2)
             top3_prize = round(random.uniform(1.0, 4.9), 2)
 
-            # --- ТОП-2 ---
             if len(winners) >= 2:
                 w2_id, w2_name, w2_earned = winners[1]
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (top2_prize, w2_id))
@@ -238,7 +245,6 @@ async def check_and_close_season(force=False):
                     )
                 except Exception: pass
 
-            # --- ТОП-3 ---
             if len(winners) >= 3:
                 w3_id, w3_name, w3_earned = winners[2]
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (top3_prize, w3_id))
@@ -261,7 +267,6 @@ async def check_and_close_season(force=False):
                 await bot.send_message(ADMIN_ID, "🏆 Сезон лидерборда завершился, но никто из пользователей не заработал звёзд. Победителей нет.")
             except Exception: pass
                 
-        # Сброс сезона
         cursor.execute("UPDATE users SET season_earned = 0.0")
         new_end = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("INSERT INTO season_info (end_date) VALUES (?)", (new_end,))
@@ -304,7 +309,6 @@ async def back_to_main(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_main_menu()
     )
 
-# ПРОСМОТР ЛИДЕРБОРДА ТОП-10 ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
 @dp.callback_query(MenuCB.filter(F.target == "user_leaderboard"))
 async def view_user_leaderboard(callback: CallbackQuery):
     cursor.execute("SELECT end_date FROM season_info ORDER BY id DESC LIMIT 1")
@@ -400,7 +404,7 @@ async def process_user_promo_activation(message: Message, state: FSMContext):
     uid = message.from_user.id
     promo_entered = message.text.strip()
     
-    cursor.execute("SELECT code, max_activations, current_activations, target_user_id, type, reward_amount FROM promocodes WHERE code = ?", (promo_entered,))
+    cursor.execute("SELECT code, max_activations, current_activations, target_user_id, type, reward_amount, expires_at, is_infinite_activations FROM promocodes WHERE code = ?", (promo_entered,))
     promo = cursor.fetchone()
     
     if not promo:
@@ -408,28 +412,39 @@ async def process_user_promo_activation(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    code, max_act, curr_act, target_uid, p_type, reward = promo
+    code, max_act, curr_act, target_uid, p_type, reward, expires_at, is_inf = promo
     
-    # Проверка на лимит использований общего пула
-    if curr_act >= max_act:
+    # 1. Проверка истечения по времени
+    if expires_at != "never":
+        try:
+            exp_date = datetime.strptime(expires_at, "%d.%m.%Y %H:%M")
+            if datetime.now() > exp_date:
+                await message.answer("❌ Срок действия этого промокода уже истёк.", reply_markup=get_main_menu())
+                await state.clear()
+                return
+        except ValueError:
+            pass
+
+    # 2. Проверка на лимит использований общего пула (если он НЕ бесконечный)
+    if is_inf == 0 and curr_act >= max_act:
         await message.answer("❌ К сожалению, этот промокод уже закончился (достигнут лимит активаций).", reply_markup=get_main_menu())
         await state.clear()
         return
         
-    # Проверка на индивидуальность промокода
+    # 3. Проверка на индивидуальность промокода
     if target_uid != 0 and target_uid != uid:
         await message.answer("❌ Данный промокод предназначен для другого пользователя.", reply_markup=get_main_menu())
         await state.clear()
         return
         
-    # Проверка на повторное использование пользователем
+    # 4. Проверка на повторное использование пользователем
     cursor.execute("SELECT id FROM promo_activations WHERE code = ? AND user_id = ?", (code, uid))
     if cursor.fetchone():
         await message.answer("❌ Вы уже активировали этот промокод ранее!", reply_markup=get_main_menu())
         await state.clear()
         return
         
-    # Применение промокода в зависимости от типа
+    # Применение промокода
     if p_type == "balance":
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (reward, uid))
         text_success = f"🎉 Промокод успешно активирован!\n\nВам на баланс начислено: {round(reward, 2)} ⭐"
@@ -437,7 +452,6 @@ async def process_user_promo_activation(message: Message, state: FSMContext):
         cursor.execute("UPDATE users SET last_bonus = NULL WHERE user_id = ?", (uid,))
         text_success = "🎉 Промокод успешно активирован!\n\nТаймер ежедневного бонуса сброшен. Можете получить его прямо сейчас!"
         
-    # Записываем активацию
     cursor.execute("INSERT INTO promo_activations (code, user_id) VALUES (?, ?)", (code, uid))
     cursor.execute("UPDATE promocodes SET current_activations = current_activations + 1 WHERE code = ?", (code,))
     conn.commit()
@@ -842,7 +856,7 @@ async def process_admin_management(callback: CallbackQuery, callback_data: Admin
         text += "\n➖ Введите Telegram ID пользователя, у которого хотите ЗАБРАТЬ звёзды:"
         await callback.message.edit_text(text, reply_markup=get_back_btn("admin_panel"))
 
-    # СТЕП 1 ДЛЯ СОЗДАНИЯ ПРОМОКОДА
+    # СТЕП 1 ДЛЯ СОЗДАНИЯ ПРОМОКОДОВ
     elif action == "create_promo":
         await state.set_state(BotStates.waiting_for_promo_name)
         await callback.message.edit_text("🎟 Создание промокода\n\nВведите сам текст промокода (например, SECRET2026):", reply_markup=get_back_btn("admin_panel"))
@@ -875,7 +889,7 @@ async def process_broadcast_message(message: Message, state: FSMContext):
         except Exception: pass
     await message.answer(f"📢 Рассылка завершена! Получили {success_count} пользователей.", reply_markup=get_main_menu())
 
-# --- ВЫДАЧА ЗВЕЗД (ВВОД ID И СУММЫ) ---
+# --- ВЫДАЧА ЗВЕЗД ---
 @dp.message(BotStates.waiting_for_give_id)
 async def process_give_id(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -903,7 +917,6 @@ async def process_give_amount(message: Message, state: FSMContext):
         target_id = data['target_id']
         await state.clear()
         
-        # Вместо мгновенного начисления отправляем выбор админу
         kb = [
             [InlineKeyboardButton(text="💎 Баланс + Сезон", callback_data=AdminConfirmGiveCB(target_id=target_id, amount=amount, include_season=1).pack())],
             [InlineKeyboardButton(text="💳 Только на баланс", callback_data=AdminConfirmGiveCB(target_id=target_id, amount=amount, include_season=0).pack())]
@@ -912,7 +925,6 @@ async def process_give_amount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное число:")
 
-# Подтверждение выдачи админом
 @dp.callback_query(AdminConfirmGiveCB.filter())
 async def execute_give_stars(callback: CallbackQuery, callback_data: AdminConfirmGiveCB):
     if callback.from_user.id != ADMIN_ID: return
@@ -932,7 +944,7 @@ async def execute_give_stars(callback: CallbackQuery, callback_data: AdminConfir
     try: await bot.send_message(uid, f"💳 Администратор начислил вам {amount} ⭐ на баланс!")
     except: pass
 
-# --- СПИСАНИЕ ЗВЕЗД (ВВОД ID И СУММЫ) ---
+# --- СПИСАНИЕ ЗВЕЗД ---
 @dp.message(BotStates.waiting_for_take_id)
 async def process_take_id(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -960,7 +972,6 @@ async def process_take_amount(message: Message, state: FSMContext):
         target_id = data['target_id']
         await state.clear()
         
-        # Отправляем выбор админу для списания
         kb = [
             [InlineKeyboardButton(text="📉 Баланс + Сезон", callback_data=AdminConfirmTakeCB(target_id=target_id, amount=amount, include_season=1).pack())],
             [InlineKeyboardButton(text="💳 Только с баланса", callback_data=AdminConfirmTakeCB(target_id=target_id, amount=amount, include_season=0).pack())]
@@ -969,7 +980,6 @@ async def process_take_amount(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное число:")
 
-# Подтверждение списания админом
 @dp.callback_query(AdminConfirmTakeCB.filter())
 async def execute_take_stars(callback: CallbackQuery, callback_data: AdminConfirmTakeCB):
     if callback.from_user.id != ADMIN_ID: return
@@ -1002,21 +1012,43 @@ async def execute_take_stars(callback: CallbackQuery, callback_data: AdminConfir
 
 # ================= ПОШАГОВЫЙ СУРС СОЗДАНИЯ ПРОМОКОДОВ ДЛЯ АДМИНИСТРАТОРА =================
 
-# СТЕП 2: Получили имя промокода -> Запрашиваем кол-во активаций
+# СТЕП 2: Получили имя промокода -> Запрашиваем тип лимита активаций
 @dp.message(BotStates.waiting_for_promo_name)
 async def process_p_name(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     p_code = message.text.strip()
     
-    # Экспресс-проверка на уникальность
     cursor.execute("SELECT code FROM promocodes WHERE code = ?", (p_code,))
     if cursor.fetchone():
         await message.answer("❌ Такой промокод уже существует! Введите другое название:")
         return
         
     await state.update_data(p_code=p_code)
+    
+    kb = [
+        [InlineKeyboardButton(text="🔢 Ограниченное", callback_data=AdminPromoCB(action="limit_numeric").pack())],
+        [InlineKeyboardButton(text="♾ Бесконечные активации", callback_data=AdminPromoCB(action="limit_infinite").pack())]
+    ]
+    await message.answer("Выберите ограничение на количество активаций промокода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# СТЕП 2.5 (Вариант А): Выбрали Ограниченное количество -> Спрашиваем число
+@dp.callback_query(AdminPromoCB.filter(F.action == "limit_numeric"))
+async def process_p_limit_numeric(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
     await state.set_state(BotStates.waiting_for_promo_activations)
-    await message.answer("Введите максимальное количество активаций промокода (число):")
+    await callback.message.edit_text("Введите максимальное количество активаций промокода (число):")
+
+# СТЕП 2.5 (Вариант Б): Выбрали Бесконечные активации -> Сразу переходим к выбору ЦА
+@dp.callback_query(AdminPromoCB.filter(F.action == "limit_infinite"))
+async def process_p_limit_infinite(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.update_data(max_acts=0, is_infinite_activations=1)
+    
+    kb = [
+        [InlineKeyboardButton(text="🌍 Для всех", callback_data=AdminPromoCB(action="target_all").pack())],
+        [InlineKeyboardButton(text="👤 Для определенного пользователя", callback_data=AdminPromoCB(action="target_user").pack())]
+    ]
+    await callback.message.edit_text("Для кого предназначен этот промокод?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 # СТЕП 3: Кол-во активаций -> Выбор ЦА (Все или Только один)
 @dp.message(BotStates.waiting_for_promo_activations)
@@ -1028,7 +1060,7 @@ async def process_p_acts(message: Message, state: FSMContext):
             await message.answer("❌ Количество активаций должно быть больше 0. Введите еще раз:")
             return
             
-        await state.update_data(max_acts=max_acts)
+        await state.update_data(max_acts=max_acts, is_infinite_activations=0)
         
         kb = [
             [InlineKeyboardButton(text="🌍 Для всех", callback_data=AdminPromoCB(action="target_all").pack())],
@@ -1038,17 +1070,17 @@ async def process_p_acts(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите целое число:")
 
-# СТЕП 4 (Вариант А): Выбрали "Для всех" -> Сразу перекидываем на выбор типа промокода
+# СТЕП 4 (Вариант А): Выбрали "Для всех" -> Спрашиваем время действия промокода
 @dp.callback_query(AdminPromoCB.filter(F.action == "target_all"))
 async def process_p_target_all(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID: return
-    await state.update_data(target_uid=0) # 0 означает для всех
+    await state.update_data(target_uid=0)
     
     kb = [
-        [InlineKeyboardButton(text="💎 На баланс", callback_data=AdminPromoCB(action="type_balance").pack())],
-        [InlineKeyboardButton(text="🎁 Ежедневный бонус (Сброс)", callback_data=AdminPromoCB(action="type_bonus").pack())]
+        [InlineKeyboardButton(text="⏳ Навсегда", callback_data=AdminPromoCB(action="exp_never").pack())],
+        [InlineKeyboardButton(text="📅 По времени", callback_data=AdminPromoCB(action="exp_timed").pack())]
     ]
-    await callback.message.edit_text("Выберите тип действия промокода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.message.edit_text("Выберите срок действия промокода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 # СТЕП 4 (Вариант Б): Выбрали "Для определенного пользователя" -> Показываем список юзеров и ждем ID
 @dp.callback_query(AdminPromoCB.filter(F.action == "target_user"))
@@ -1065,7 +1097,7 @@ async def process_p_target_user(callback: CallbackQuery, state: FSMContext):
     text += "\n👤 Введите Telegram ID пользователя, который сможет его активировать:"
     await callback.message.edit_text(text, reply_markup=get_back_btn("admin_panel"))
 
-# СТЕП 5: Получили ID юзера -> Перекидываем на выбор типа промокода
+# СТЕП 5: Получили ID юзера -> Переходим к выбору срока действия промокода
 @dp.message(BotStates.waiting_for_promo_target_id)
 async def process_p_target_id_input(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -1079,12 +1111,49 @@ async def process_p_target_id_input(message: Message, state: FSMContext):
         await state.update_data(target_uid=t_id)
         
         kb = [
+            [InlineKeyboardButton(text="⏳ Навсегда", callback_data=AdminPromoCB(action="exp_never").pack())],
+            [InlineKeyboardButton(text="📅 По времени", callback_data=AdminPromoCB(action="exp_timed").pack())]
+        ]
+        await message.answer("Выберите срок действия промокода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    except ValueError:
+        await message.answer("❌ Введите числовой Telegram ID:")
+
+# СТЕП 5.5 (Вариант А): Выбрали Срок "Навсегда" -> Переходим к выбору типа промокода
+@dp.callback_query(AdminPromoCB.filter(F.action == "exp_never"))
+async def process_p_exp_never(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.update_data(expires_at="never")
+    
+    kb = [
+        [InlineKeyboardButton(text="💎 На баланс", callback_data=AdminPromoCB(action="type_balance").pack())],
+        [InlineKeyboardButton(text="🎁 Ежедневный бонус (Сброс)", callback_data=AdminPromoCB(action="type_bonus").pack())]
+    ]
+    await callback.message.edit_text("Выберите тип действия промокода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+# СТЕП 5.5 (Вариант Б): Выбрали Срок "По времени" -> Запрашиваем дату и время
+@dp.callback_query(AdminPromoCB.filter(F.action == "exp_timed"))
+async def process_p_exp_timed(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.set_state(BotStates.waiting_for_promo_expiration_date)
+    await callback.message.edit_text("Введите дату и время окончания действия промокода в формате `DD.MM.YYYY HH:MM` (например, `21.06.2026 18:00`):")
+
+# СТЕП 5.6: Получили дату окончания -> Проверяем формат и переходим к выбору типа промокода
+@dp.message(BotStates.waiting_for_promo_expiration_date)
+async def process_p_expiration_date_input(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    date_text = message.text.strip()
+    try:
+        # Проверяем валидность формата даты
+        datetime.strptime(date_text, "%d.%m.%Y %H:%M")
+        await state.update_data(expires_at=date_text)
+        
+        kb = [
             [InlineKeyboardButton(text="💎 На баланс", callback_data=AdminPromoCB(action="type_balance").pack())],
             [InlineKeyboardButton(text="🎁 Ежедневный бонус (Сброс)", callback_data=AdminPromoCB(action="type_bonus").pack())]
         ]
         await message.answer("Выберите тип действия промокода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     except ValueError:
-        await message.answer("❌ Введите числовой Telegram ID:")
+        await message.answer("❌ Неверный формат! Пожалуйста, введите дату строго в формате `DD.MM.YYYY HH:MM` (например, `21.06.2026 18:00`):")
 
 # СТЕП 6 (Тип "На Баланс"): Просим ввести сумму
 @dp.callback_query(AdminPromoCB.filter(F.action == "type_balance"))
@@ -1106,8 +1175,8 @@ async def process_p_reward_balance(message: Message, state: FSMContext):
             
         data = await state.get_data()
         cursor.execute(
-            "INSERT INTO promocodes (code, max_activations, target_user_id, type, reward_amount) VALUES (?, ?, ?, ?, ?)",
-            (data['p_code'], data['max_acts'], data['target_uid'], data['p_type'], reward)
+            "INSERT INTO promocodes (code, max_activations, target_user_id, type, reward_amount, expires_at, is_infinite_activations) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (data['p_code'], data['max_acts'], data['target_uid'], data['p_type'], reward, data['expires_at'], data.get('is_infinite_activations', 0))
         )
         conn.commit()
         
@@ -1116,15 +1185,15 @@ async def process_p_reward_balance(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное число:")
 
-# СТЕП 6 (Финальный для "Ежедневный бонус"): Не требует ввода сумм, сразу сохраняем в БД
+# СТЕП 6 (Финальный для "Ежедневный бонус"): Сохраняем в БД без ввода сумм
 @dp.callback_query(AdminPromoCB.filter(F.action == "type_bonus"))
 async def process_p_type_bonus(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID: return
     data = await state.get_data()
     
     cursor.execute(
-        "INSERT INTO promocodes (code, max_activations, target_user_id, type, reward_amount) VALUES (?, ?, ?, ?, ?)",
-        (data['p_code'], data['max_acts'], data['target_uid'], "bonus_reset", 0.0)
+        "INSERT INTO promocodes (code, max_activations, target_user_id, type, reward_amount, expires_at, is_infinite_activations) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (data['p_code'], data['max_acts'], data['target_uid'], "bonus_reset", 0.0, data['expires_at'], data.get('is_infinite_activations', 0))
     )
     conn.commit()
     
