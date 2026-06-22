@@ -22,6 +22,14 @@ from aiogram.types import (
 from aiogram.filters.callback_data import CallbackData
 
 # ================= НАСТРОЙКИ БОТА =================
+from dotenv import load_dotenv
+
+ENV_PATH = "/storage/emulated/0/asnos/gb/tu/.env"
+
+if os.path.exists(ENV_PATH):
+    load_dotenv(dotenv_path=ENV_PATH)
+else:
+    load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -413,10 +421,11 @@ async def cmd_start(message: Message, state: FSMContext):
                 is_premium = getattr(message.from_user, "is_premium", False) or False
                 bonus_stars = 2.0 if is_premium else 1.0
                 
-                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (bonus_stars, ref_id))
+                # ИЗМЕНЕНИЕ: Звезды за реферальный переход идут и на баланс, и в лидерборд сезона
+                cursor.execute("UPDATE users SET balance = balance + ?, season_earned = season_earned + ? WHERE user_id = ?", (bonus_stars, bonus_stars, ref_id))
                 try:
                     p_text = " (Премиум ⭐)" if is_premium else ""
-                    await bot.send_message(ref_id, f"🎉 По вашей реф. ссылке зарегистрировался новый пользователь {uname}{p_text}!\nВам начислено +{bonus_stars} ⭐")
+                    await bot.send_message(ref_id, f"🎉 По вашей реф. ссылке зарегистрировался новый пользователь {uname}{p_text}!\nВам начислено +{bonus_stars} ⭐ (засчитано в лидерборд)")
                 except Exception:
                     pass
             else:
@@ -469,7 +478,7 @@ async def view_user_leaderboard(callback: CallbackQuery):
             medal = medals[i] if i < len(medals) else "•"
             text += f"{medal} {user[0]} — {round(user[1], 2)} ⭐\n"
     else:
-        text += "Рейтинг пока пуст. Станьте первым, заработав звёзды!"
+        text += "Рейтинг пока пуст. Станьте первым, зарабокав звёзды!"
         
     await callback.message.edit_text(text, reply_markup=get_back_btn("main"))
 
@@ -765,7 +774,7 @@ async def case_open_animation(callback: CallbackQuery, callback_data: CaseCB):
     ]
     await callback.message.edit_text(f"🎁 **Результат открытия:**\n\n{reward_text}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="Markdown")
 
-# --- НОВЫЙ РАЗДЕЛ: ПОДРОБНАЯ РЕФЕРАЛЬНАЯ СИСТЕМА ---
+# --- РАЗДЕЛ: ПОДРОБНАЯ РЕФЕРАЛЬНАЯ СИСТЕМА ---
 @dp.callback_query(MenuCB.filter(F.target == "user_ref_menu"))
 async def user_ref_menu(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -779,9 +788,9 @@ async def user_ref_menu(callback: CallbackQuery):
         "🔗 **Реферальная система**\n\n"
         "Приглашайте друзей и зарабатывайте звёзды вместе! Наша система полностью прозрачна и даёт бонусы за каждого активного игрока.\n\n"
         "📋 **Условия начисления бонусов:**\n"
-        "1. **За каждого нового пользователя:** вы моментально получаете **+1.0 ⭐** на свой текущий баланс.\n"
+        "1. **За каждого нового пользователя:** вы моментально получаете **+1.0 ⭐** на свой баланс и в лидерборд.\n"
         "2. **Если у вашего друга есть Telegram Premium:** стартовая награда увеличивается и составляет **+2.0 ⭐**!\n"
-        "3. **Пассивный доход для всех:** Вы гарантированно получаете **3%** от суммы каждого ежедневного бонуса, который активируют **абсолютно все ваши рефералы**.\n"
+        "3. **Пассивный доход для всех:** Вы гарантированно получаете **3%** от суммы каждого ежедневного бонуса, который активируют ваши рефералы (начисляются также в лидерборд).\n"
         "4. **Подарочные кейсы:** За каждые 5 приглашенных друзей вам выдается 1 Реферальный кейс!\n\n"
         f"👥 Всего приглашено друзей: **{total_refs}**\n\n"
         f"📎 Ваша реферальная ссылка:\n`{ref_link}`"
@@ -839,9 +848,10 @@ async def get_daily_bonus(callback: CallbackQuery):
     if referrer_id and referrer_id != 0:
         ref_cut = round(bonus_amount * 0.03, 4)
         if ref_cut > 0:
-            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (ref_cut, referrer_id))
+            # ИЗМЕНЕНИЕ: 3% от ежедневного бонуса реферала капают рефереру как на баланс, так и в лидерборд сезона
+            cursor.execute("UPDATE users SET balance = balance + ?, season_earned = season_earned + ? WHERE user_id = ?", (ref_cut, ref_cut, referrer_id))
             try:
-                await bot.send_message(referrer_id, f"📈 Реферальный бонус! Вы получили {ref_cut} ⭐ (3% от ежедневного бонуса вашего реферала).")
+                await bot.send_message(referrer_id, f"📈 Реферальный бонус! Вы получили {ref_cut} ⭐ (3% от ежедневного бонуса вашего реферала, зачислено в лидерборд).")
             except Exception:
                 pass
                 
@@ -1685,7 +1695,7 @@ async def process_p_case_count_finish(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите корректное целое число:")
 
-# --- ИСПРАВЛЕННЫЙ И ЭКРАНИРОВАННЫЙ СПИСОК ПОЛЬЗОВАТЕЛЕЙ БЕЗ БАГОВ HTML ПАРСЕРА ---
+# --- СПИСОК ПОЛЬЗОВАТЕЛЕЙ БЕЗ БАГОВ HTML ПАРСЕРА ---
 @dp.callback_query(AdminManageCB.filter(F.action == "user_list_view"))
 async def admin_user_list_view(callback: CallbackQuery):
     if not is_any_admin(callback.from_user.id): return
