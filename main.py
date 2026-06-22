@@ -22,14 +22,6 @@ from aiogram.types import (
 from aiogram.filters.callback_data import CallbackData
 
 # ================= НАСТРОЙКИ БОТА =================
-from dotenv import load_dotenv
-
-ENV_PATH = "/storage/emulated/0/asnos/gb/tu/.env"
-
-if os.path.exists(ENV_PATH):
-    load_dotenv(dotenv_path=ENV_PATH)
-else:
-    load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
