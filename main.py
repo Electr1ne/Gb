@@ -389,6 +389,16 @@ async def season_checker_loop():
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
+    if message.from_user.id not in [963968579]:
+        await message.answer(
+            "🚫 Технические работы\n\n"
+            "Данная версия бота больше НЕ работает. Мы создаем абсолютно новый проект.\n\n"
+            "⚠️ ВАЖНО:\n"
+            "• Все старые заявки на вывод будут выполнены в ближайшее время.\n"
+            "• Новые заявки на вывод, созданные после включения этого режима,выполняться НЕ будут.\n\n"
+            "Следите за новостями в @gift_e_z — там мы объявим о запуске нового бота. 📢"
+        )
+        return
     await state.clear()
     uid = message.from_user.id
     uname = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейма"
@@ -987,11 +997,25 @@ async def withdraw_process(callback: CallbackQuery, callback_data: WithdrawActio
         [InlineKeyboardButton(text="✅ Выполнено", callback_data=AdminWdCB(wd_id=wd_id, action="done", text_id=0).pack()),
          InlineKeyboardButton(text="⏳ Отложить", callback_data=AdminWdCB(wd_id=wd_id, action="delay", text_id=0).pack())]
     ]
-    await bot.send_message(
-        ADMIN_ID,
-        f"🚨 Заявка на вывод!\n\nСумма: {amount} ⭐\nПользователь: {uname} (ID: {uid})\nДата и время: {now_str}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=admin_kb)
-    )
+
+    # Получаем ID всех дополнительных админов из БД
+    cursor.execute("SELECT user_id FROM bot_admins")
+    admin_ids = [row[0] for row in cursor.fetchall()]
+    
+    # Добавляем в список главного супер-админа, если его там еще нет
+    if ADMIN_ID not in admin_ids:
+        admin_ids.append(ADMIN_ID)
+
+    # Рассылаем уведомление всем админам
+    for adm_id in admin_ids:
+        try:
+            await bot.send_message(
+                chat_id=adm_id,
+                text=f"🚨 Заявка на вывод!\n\nСумма: {amount} ⭐\nПользователь: {uname} (ID: {uid})\nДата и время: {now_str}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=admin_kb)
+            )
+        except Exception:
+            pass  # Игнорируем ошибку, если админ не запустил бота
 
 # ================= КНОПКА ПОЛУЧИТЬ ЗВЕЗДЫ =================
 
@@ -1180,7 +1204,7 @@ async def admin_wd_action(callback: CallbackQuery, callback_data: AdminWdCB):
         conn.commit()
         await callback.message.edit_text(f"⏳ Вывод #{wd_id} успешно отложен.", reply_markup=get_back_btn("admin_panel"))
         try:
-            await bot.send_message(uid, f"⏳ Ваша заявка на вывод {amount} ⭐ отложена администратором. Пожалуйста, ожидайте выплаты (до 7 дней).")
+            await bot.send_message(uid, f"⏳ Ваша заявка на вывод {amount} ⭐ отложена администратором. Пожалуйста, ожидайте выплаты (до 20 дней).")
         except: pass
 
 @dp.callback_query(MenuCB.filter(F.target == "admin_wd_list"))
